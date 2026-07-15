@@ -60,6 +60,33 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+class EpochProgress(Callback):
+    """Печатает номер эпохи в stdout.
+
+    В поде нет TTY, а прогресс-бар выключен (``enable_progress_bar=False``,
+    иначе tqdm заспамит лог ``\\r``-переводами) — поэтому без явного print
+    в логах не видно, на какой эпохе идёт обучение. Печатаем на входе и
+    выходе каждой эпохи, с ``flush=True`` (иначе строки застрянут в буфере
+    до конца процесса).
+    """
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        """Старт эпохи — сразу видно, что обучение зашло в новую эпоху."""
+        print(
+            f"epoch {trainer.current_epoch + 1}/{trainer.max_epochs} started",
+            flush=True,
+        )
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Конец эпохи — печатаем номер и текущий train_loss (из autolog-метрик)."""
+        loss = trainer.callback_metrics.get("train_loss")
+        loss_s = f" train_loss={float(loss):.4f}" if loss is not None else ""
+        print(
+            f"epoch {trainer.current_epoch + 1}/{trainer.max_epochs} done{loss_s}",
+            flush=True,
+        )
+
+
 class EpochDelay(Callback):
     """Пауза после каждой эпохи — даёт время на Suspend в демо MLT-05."""
 
@@ -154,7 +181,7 @@ def main() -> None:
 
     trainer = pl.Trainer(
         max_epochs=args.max_epochs,
-        callbacks=[checkpoint_cb, EpochDelay(args.epoch_delay)],
+        callbacks=[checkpoint_cb, EpochProgress(), EpochDelay(args.epoch_delay)],
         enable_progress_bar=False,
         log_every_n_steps=1,
         accelerator="auto",
