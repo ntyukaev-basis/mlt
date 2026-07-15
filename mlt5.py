@@ -1,23 +1,3 @@
-"""MLT-05 — обучение MLP на PyTorch Lightning с чекпоинтами и resume.
-
-Конфигурируется через argparse (без чтения переменных окружения). Пути,
-которые платформа отдаёт через env (точка монтирования датасета и каталог
-чекпоинтов), пробрасываются в аргументы на уровне манифеста нагрузки,
-например: ``python train.py --data-dir "$AIR_DATASET_..._PATH"
---checkpoints-dir "$AIR_CHECKPOINTS_PATH"``.
-
-Ключевые контракты кейса:
-  * данные датасета MLT-03 читаются из каталога ``--data-dir``;
-  * чекпоинт ``last.ckpt`` пишется каждую эпоху в ``--checkpoints-dir``;
-  * при старте, если чекпоинт существует, обучение продолжается с него
-    (``Trainer.fit(ckpt_path=...)``) и печатается ``resumed from epoch N``;
-  * ``--epoch-delay`` растягивает эпохи (пауза после каждой), чтобы успеть
-    выполнить Suspend в середине обучения;
-  * НИ ОДНОГО вызова ``mlflow.log_*`` — гиперпараметры, метрики эпох и
-    model_summary фиксирует autolog (инъектируется платформой как
-    sitecustomize при ``experiment_tracking.autolog: true``).
-"""
-
 import argparse
 import glob
 import os
@@ -36,14 +16,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--data-dir",
         required=True,
-        help="Каталог примонтированного датасета MLT-03 (внутри — папки версий "
-        "с wine.csv)",
+        help="Каталог примонтированного датасета MLT-03 (внутри — папки версий с wine.csv)",
     )
     p.add_argument(
         "--checkpoints-dir",
         default="/checkpoints",
-        help="Каталог для last.ckpt (том air-checkpoints; по умолчанию "
-        "/checkpoints)",
+        help="Каталог для last.ckpt (том air-checkpoints; по умолчанию /checkpoints)",
     )
     p.add_argument("--max-epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=32)
@@ -163,12 +141,20 @@ def main() -> None:
     os.makedirs(args.checkpoints_dir, exist_ok=True)
     last_ckpt = os.path.join(args.checkpoints_dir, "last.ckpt")
 
-    # save_last=True пишет ровно <dir>/last.ckpt; every_n_epochs=1 — каждую эпоху.
+    # Чекпоинт каждую эпоху, чтобы Suspend В СЕРЕДИНЕ обучения оставлял
+    # last.ckpt для resume.
+    #
+    # ВАЖНО: ``save_top_k=0`` тут НЕЛЬЗЯ — при нём Lightning пишет last.ckpt
+    # ТОЛЬКО по завершении ``fit()`` (проверено на 2.6: после эпох 1/2/3
+    # файла нет, появляется лишь в конце). Тогда прерывание в середине не
+    # оставляет чекпоинта и resume стартует с эпохи 1. ``save_top_k=1``
+    # заставляет писать чекпоинт (и обновлять last.ckpt) каждую эпоху;
+    # держится один ротируемый ``epoch=*.ckpt`` + last.ckpt.
     checkpoint_cb = ModelCheckpoint(
         dirpath=args.checkpoints_dir,
         save_last=True,
         every_n_epochs=1,
-        save_top_k=0,  # держим только last.ckpt, без «лучших» копий
+        save_top_k=1,
     )
 
     # Авто-resume: если чекпоинт уже есть — продолжаем с него.
