@@ -81,7 +81,7 @@ def pick_version_dir(
 
 def main() -> None:
     args = parse_args()
-    vdir = pick_version_dir(args.dataset_dir, args.version_id)
+    vdir = pick_version_dir(args.dataset_dir, args.version_id, args.storage_uri)
     csvs = sorted(glob.glob(os.path.join(vdir, "**", "*.csv"), recursive=True))
     if not csvs:
         raise SystemExit(f"retrain: no CSV in version dir {vdir!r}")
@@ -89,7 +89,15 @@ def main() -> None:
     print(f"retrain: version dir={vdir} csv={src}")
 
     df = pd.read_csv(src, sep=None, engine="python")
-    X = df.drop(columns=[args.target_col])
+    # Columns the PLATFORM added are prefixed ``air_`` — the correlation
+    # id and the predictions a produced version carries for traceability
+    # and CBPE calibration. They are not features: leaving the string
+    # correlation id in X kills fit() with "could not convert string to
+    # float".
+    platform_cols = [c for c in df.columns if c.startswith("air_")]
+    if platform_cols:
+        print(f"retrain: dropping platform columns {platform_cols}")
+    X = df.drop(columns=[args.target_col, *platform_cols])
     y = df[args.target_col] >= df[args.target_col].median()
     Xtr, Xte, ytr, yte = train_test_split(X, y, random_state=42)
     clf = GradientBoostingClassifier(n_estimators=50, learning_rate=0.1)
