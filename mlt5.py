@@ -1,8 +1,8 @@
 import argparse
-import glob
 import os
 import time
 
+import air_dataset
 import lightning.pytorch as pl
 import pandas as pd
 import torch
@@ -22,6 +22,12 @@ def parse_args() -> argparse.Namespace:
         "--checkpoints-dir",
         default="/checkpoints",
         help="Каталог для last.ckpt (том air-checkpoints; по умолчанию /checkpoints)",
+    )
+    p.add_argument(
+        "--storage-uri",
+        default=os.environ.get("AIR_DATASET_STORAGE_URI"),
+        help="Расположение отслеживаемой версии по данным платформы; последний "
+        "сегмент пути — имя папки версии (по умолчанию $AIR_DATASET_STORAGE_URI)",
     )
     p.add_argument("--max-epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=32)
@@ -77,16 +83,19 @@ class EpochDelay(Callback):
             time.sleep(self.seconds)
 
 
-def load_wine(data_dir: str) -> tuple[torch.Tensor, torch.Tensor]:
-    """Читает последнюю версию wine.csv и готовит тензоры (X стандартизован)."""
-    # Датасет примонтирован целиком: каждая версия — своя папка. Берём последнюю.
-    matches = sorted(glob.glob(os.path.join(data_dir, "*", "wine.csv")))
-    if not matches:
-        # запасной вариант — файл лежит прямо в корне каталога
-        matches = sorted(glob.glob(os.path.join(data_dir, "wine.csv")))
-    if not matches:
-        raise RuntimeError(f"wine.csv не найден под {data_dir}")
-    df = pd.read_csv(matches[-1])
+def load_wine(
+    data_dir: str, storage_uri: str | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Читает нужную версию wine.csv и готовит тензоры (X стандартизован).
+
+    Выбор папки версии — в ``air_dataset``: сортировка имён здесь давала не
+    «последнюю», а «наибольшую строку», и на стенде это молча уводило обучение
+    на версию с другой схемой.
+    """
+    path = air_dataset.resolve_csv(data_dir, "wine.csv", storage_uri)
+    print(f"training on: {path}", flush=True)
+    df = pd.read_csv(path)
+    air_dataset.require_columns(df, ["quality"], path)
 
     y = (df["quality"] >= 6).astype("int64").to_numpy()
     x = df.drop(columns=["quality"]).astype("float32")
@@ -131,7 +140,7 @@ def main() -> None:
     args = parse_args()
     pl.seed_everything(args.seed, workers=True)
 
-    x, y = load_wine(args.data_dir)
+    x, y = load_wine(args.data_dir, args.storage_uri)
     loader = DataLoader(
         TensorDataset(x, y),
         batch_size=args.batch_size,

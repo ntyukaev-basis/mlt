@@ -18,9 +18,9 @@ arguments at the manifest level. Keeps the script runnable by hand:
     python mlt4.py --data-dir ./out --n-estimators 10
 """
 import argparse
-import glob
 import os
 
+import air_dataset
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
@@ -55,62 +55,14 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def resolve_csv(data_dir: str, file_name: str, storage_uri: str | None) -> str:
-    """Find the CSV whether a WHOLE dataset or a single version is mounted.
-
-    A pinned version mounts its own contents, putting the file at
-    ``<mount>/<name>``. A whole dataset mounts one folder PER VERSION, and
-    picking the right folder is where this gets sharp.
-
-    Folder names are NOT uniform: a version created by upload is named after
-    its version id, one produced by a workload carries whatever name that
-    workload chose (``20260721-035614``, ``labeled-202607171240``). So sorting
-    the names and taking the last one does not mean "newest" — it means
-    "whichever string happens to sort highest", which on the DE stand quietly
-    selected a months-old uploaded version with a different schema and blew up
-    on a missing column. Same trap as in mlt11.py.
-
-    So: the platform states the location of the version being tracked in
-    AIR_DATASET_STORAGE_URI — trust that, and use the last path segment as the
-    folder. Only when it is absent fall back to the newest folder BY
-    MODIFICATION TIME, which at least means what it says.
-    """
-    direct = os.path.join(data_dir, file_name)
-    if os.path.isfile(direct):
-        return direct
-
-    if storage_uri:
-        folder = storage_uri.rstrip("/").rsplit("/", 1)[-1]
-        pinned = os.path.join(data_dir, folder, file_name)
-        if os.path.isfile(pinned):
-            return pinned
-        print(f"warning: {folder}/{file_name} not found, falling back to newest")
-
-    hits = glob.glob(os.path.join(data_dir, "*", file_name))
-    if not hits:
-        raise SystemExit(
-            f"no {file_name} under {data_dir} (looked at <dir>/{file_name} "
-            f"and <dir>/*/{file_name}) — has MLT-03 published a version yet?"
-        )
-    return max(hits, key=os.path.getmtime)
-
-
 def main() -> None:
     args = parse_args()
 
-    path = resolve_csv(args.data_dir, args.file_name, args.storage_uri)
+    path = air_dataset.resolve_csv(args.data_dir, args.file_name, args.storage_uri)
     print(f"training on: {path}")
     df = pd.read_csv(path)
 
-    # Versions of one dataset can differ in schema (an uploaded CSV and a
-    # produced one need not agree). Say so plainly instead of letting pandas
-    # raise a KeyError from three frames down.
-    if args.target_col not in df.columns:
-        raise SystemExit(
-            f"no '{args.target_col}' column in {path}; columns are: "
-            f"{list(df.columns)}. Wrong dataset version? Pin the intended one "
-            f"via experiment_tracking.dataset_version_id, or pass --target-col."
-        )
+    air_dataset.require_columns(df, [args.target_col], path)
 
     X = df.drop(columns=[args.target_col])
     y = df[args.target_col] >= args.threshold
