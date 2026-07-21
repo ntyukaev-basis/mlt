@@ -13,13 +13,32 @@ the drift detector fires DEGRADED and continuous training retrains.
 The predict URL is derived from the InferenceService name
 (``--serve-name`` → ``http://<name>-predictor/v1/models/<name>:predict``)
 or given verbatim (``--target-url``) — nothing about the serve is
-hard-coded into the workload template.
+hard-coded into the workload template. Prefer ``--target-url``: the
+derived form assumes the InferenceService name and the name the runtime
+publishes the model under are the same, which is only true by convention.
+
+Column headers are normalised to the form platform training records in
+the model signature (see ``normalise_column``); ``--raw-columns`` sends
+them verbatim.
 """
 import argparse
 import glob
 import json
 import os
 import urllib.request
+
+
+def normalise_column(name: str) -> str:
+    """Column name as the training pipeline records it in the signature.
+
+    MLflow enforces its input schema BY NAME, and platform training jobs
+    normalise headers before fitting — so a model trained on
+    ``wine-quality.csv`` expects ``fixed_acidity`` / ``ph`` while the CSV
+    itself still says ``fixed acidity`` / ``pH``. Sending the raw headers
+    makes every request fail schema validation with HTTP 400, which reads
+    like a broken endpoint rather than a naming mismatch.
+    """
+    return "_".join(str(name).strip().lower().split())
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +73,14 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--target-col", default="quality",
                    help="Label column to drop before sending features.")
+    p.add_argument(
+        "--raw-columns",
+        action="store_true",
+        default=os.environ.get("RAW_COLUMNS", "").lower() in ("1", "true"),
+        help="Send CSV headers verbatim instead of normalising them to the "
+             "form platform training records in the model signature. For a "
+             "model trained outside the platform on the raw headers.",
+    )
     return p.parse_args()
 
 
@@ -67,6 +94,8 @@ def main() -> None:
     if not csvs:
         raise SystemExit(f"traffic: no CSV under {args.dataset_dir!r}")
     df = pd.read_csv(csvs[0], sep=None, engine="python")
+    if not args.raw_columns:
+        df.columns = [normalise_column(c) for c in df.columns]
     if args.target_col in df.columns:
         df = df.drop(columns=[args.target_col])
     df = df.head(args.count)
