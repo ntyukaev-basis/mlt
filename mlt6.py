@@ -1,7 +1,7 @@
 import argparse
-import glob
 import os
 
+import air_dataset
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.model_selection import train_test_split
@@ -21,6 +21,12 @@ def parse_args() -> argparse.Namespace:
         help="Сетка learning_rate через запятую; индекс ветки выбирает из неё "
         "своё значение (по умолчанию 4 варианта под replicas: 4)",
     )
+    p.add_argument(
+        "--storage-uri",
+        default=os.environ.get("AIR_DATASET_STORAGE_URI"),
+        help="Расположение отслеживаемой версии по данным платформы; последний "
+        "сегмент пути — имя папки версии (по умолчанию $AIR_DATASET_STORAGE_URI)",
+    )
     p.add_argument("--n-estimators", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
@@ -39,16 +45,21 @@ def branch_index() -> int:
     return int(raw)
 
 
-def load_wine(data_dir: str) -> tuple[pd.DataFrame, pd.Series]:
-    """Читает последнюю версию wine.csv и готовит признаки/таргет (quality >= 6)."""
-    # Датасет примонтирован целиком: каждая версия — своя папка. Берём последнюю.
-    matches = sorted(glob.glob(os.path.join(data_dir, "*", "wine.csv")))
-    if not matches:
-        # запасной вариант — файл лежит прямо в корне каталога
-        matches = sorted(glob.glob(os.path.join(data_dir, "wine.csv")))
-    if not matches:
-        raise RuntimeError(f"wine.csv не найден под {data_dir}")
-    df = pd.read_csv(matches[-1])
+def load_wine(
+    data_dir: str, storage_uri: str | None = None
+) -> tuple[pd.DataFrame, pd.Series]:
+    """Читает нужную версию wine.csv и готовит признаки/таргет (quality >= 6).
+
+    Выбор папки версии — в ``air_dataset``: сортировка имён давала не
+    «последнюю», а «наибольшую строку», и уводила ветку sweep на версию с
+    другой схемой. Для sweep это особенно неприятно: ветки обязаны читать
+    ОДИН И ТОТ ЖЕ вход, иначе их метрики несравнимы, а весь смысл кейса — в
+    сравнении.
+    """
+    path = air_dataset.resolve_csv(data_dir, "wine.csv", storage_uri)
+    print(f"branch data: {path}", flush=True)
+    df = pd.read_csv(path)
+    air_dataset.require_columns(df, ["quality"], path)
     return df.drop(columns=["quality"]), (df["quality"] >= 6)
 
 
@@ -67,7 +78,7 @@ def main() -> None:
     # (gang) и какая ветка какой learning_rate взяла.
     print(f"JOB_INDEX={idx} learning_rate={lr}", flush=True)
 
-    X, y = load_wine(args.data_dir)
+    X, y = load_wine(args.data_dir, args.storage_uri)
     Xtr, Xte, ytr, yte = train_test_split(X, y, random_state=args.seed)
 
     # Гиперпараметры конструктора (в т.ч. learning_rate) и метрику training_score
