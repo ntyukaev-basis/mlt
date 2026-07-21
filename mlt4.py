@@ -33,6 +33,12 @@ def parse_args() -> argparse.Namespace:
         help="Dataset mount point. The platform states it in "
              "AIR_DATASET_<SLUG>_PATH; pass that through in the manifest.",
     )
+    p.add_argument(
+        "--storage-uri", default=os.environ.get("AIR_DATASET_STORAGE_URI"),
+        help="Platform-stated location of the tracked version; its last path "
+             "segment is the folder to train on "
+             "(default: $AIR_DATASET_STORAGE_URI).",
+    )
     p.add_argument("--file-name", default="wine.csv",
                    help="CSV to read inside the dataset.")
     p.add_argument("--target-col", default="quality",
@@ -49,33 +55,62 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def resolve_csv(data_dir: str, file_name: str) -> str:
+def resolve_csv(data_dir: str, file_name: str, storage_uri: str | None) -> str:
     """Find the CSV whether a WHOLE dataset or a single version is mounted.
 
-    A whole dataset mounts as one folder per version, so the file sits at
-    ``<mount>/<version>/<name>`` and the newest folder wins. A pinned version
-    mounts its own contents directly, putting the file at ``<mount>/<name>``.
-    Supporting both keeps the script usable from MLT-04 (whole dataset) and
-    from a retrain that pins one version, without a second code path.
+    A pinned version mounts its own contents, putting the file at
+    ``<mount>/<name>``. A whole dataset mounts one folder PER VERSION, and
+    picking the right folder is where this gets sharp.
+
+    Folder names are NOT uniform: a version created by upload is named after
+    its version id, one produced by a workload carries whatever name that
+    workload chose (``20260721-035614``, ``labeled-202607171240``). So sorting
+    the names and taking the last one does not mean "newest" — it means
+    "whichever string happens to sort highest", which on the DE stand quietly
+    selected a months-old uploaded version with a different schema and blew up
+    on a missing column. Same trap as in mlt11.py.
+
+    So: the platform states the location of the version being tracked in
+    AIR_DATASET_STORAGE_URI — trust that, and use the last path segment as the
+    folder. Only when it is absent fall back to the newest folder BY
+    MODIFICATION TIME, which at least means what it says.
     """
     direct = os.path.join(data_dir, file_name)
     if os.path.isfile(direct):
         return direct
-    hits = sorted(glob.glob(os.path.join(data_dir, "*", file_name)))
+
+    if storage_uri:
+        folder = storage_uri.rstrip("/").rsplit("/", 1)[-1]
+        pinned = os.path.join(data_dir, folder, file_name)
+        if os.path.isfile(pinned):
+            return pinned
+        print(f"warning: {folder}/{file_name} not found, falling back to newest")
+
+    hits = glob.glob(os.path.join(data_dir, "*", file_name))
     if not hits:
         raise SystemExit(
             f"no {file_name} under {data_dir} (looked at <dir>/{file_name} "
             f"and <dir>/*/{file_name}) — has MLT-03 published a version yet?"
         )
-    return hits[-1]
+    return max(hits, key=os.path.getmtime)
 
 
 def main() -> None:
     args = parse_args()
 
-    path = resolve_csv(args.data_dir, args.file_name)
+    path = resolve_csv(args.data_dir, args.file_name, args.storage_uri)
     print(f"training on: {path}")
     df = pd.read_csv(path)
+
+    # Versions of one dataset can differ in schema (an uploaded CSV and a
+    # produced one need not agree). Say so plainly instead of letting pandas
+    # raise a KeyError from three frames down.
+    if args.target_col not in df.columns:
+        raise SystemExit(
+            f"no '{args.target_col}' column in {path}; columns are: "
+            f"{list(df.columns)}. Wrong dataset version? Pin the intended one "
+            f"via experiment_tracking.dataset_version_id, or pass --target-col."
+        )
 
     X = df.drop(columns=[args.target_col])
     y = df[args.target_col] >= args.threshold
